@@ -1,10 +1,10 @@
-# app.py
 import streamlit as st
-# 페이지 정의
-home = st.Page("../home.py", title="홈", icon="🏠")
-chart = st.Page("chart.py", title="차트", icon="📈")
-map = st.Page("map.py", title="지도", icon="🌍")
-data = st.Page("data.py", title="데이터", icon="📊")
-# 네비게이션 설정
-pg = st.navigation([home, chart,map, data])
+
+home = st.Page("Home.py", title="홈", icon="🏠")
+chart = st.Page("pages/1_📈_차트_데모.py", title="차트", icon="📈")
+map = st.Page("pages/2_🌍_지도_데모.py", title="지도", icon="🌍")
+data = st.Page("pages/3_📊_데이터_데모.py", title="데이터", icon="📊")
+
+
+pg = st.navigation([home, chart, map, data])
 pg.run()
