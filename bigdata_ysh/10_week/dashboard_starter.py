@@ -17,6 +17,9 @@
 힌트는 3교시 강의안: 10_week/plane/3교시_Streamlit_대시보드_자율실습.md
 """
 
+import math
+import re
+from urllib.parse import unquote, urlparse, parse_qs
 import json
 import re
 import time
@@ -58,19 +61,17 @@ def load_models():
         }
     """
     # TODO 1-A: classification_results.pkl 읽기
-    #   with open("classification_results.pkl", "rb") as f:
-    #       results = pickle.load(f)
-    #   필요한 키: rf_model, xgb_model, iqr_bounds, feature_cols
-    pass
+    with open("classification_results.pkl", "rb") as f:
+        results = pickle.load(f)
 
-    # TODO 1-B: 반환 dict 만들기
-    #   return {
-    #       "rf": results["rf_model"],
-    #       "xgb": results["xgb_model"],
-    #       "iqr_bounds": results["iqr_bounds"],
-    #       "feature_cols": results["feature_cols"],
-    #       "iqr_threshold": 2,
-    #   }
+    # TODO 1-B: 반환 dict 만들기 (이 데이터들이 results 딕셔너리 안에 들어있습니다)
+    return {
+    "rf": results["rf_model"],
+    "xgb": results["xgb_model"],
+    "iqr_bounds": results["iqr_bounds"],
+    "feature_cols": results["feature_cols"],
+    "iqr_threshold": 2, # 실습에서 설정한 임계값
+}
 
 
 # ============================================================
@@ -84,59 +85,84 @@ PATH_PATTERNS = ["../", "..\\", "/etc/passwd", "/etc/shadow"]
 
 
 def extract_features(http_text: str, feature_cols: list) -> np.ndarray:
-    """사용자가 입력한 HTTP 텍스트에서 23개 숫자 특성을 추출.
+    """사용자가 입력한 HTTP 텍스트에서 23개 숫자 특성을 추출."""
+    
+    # --- Step 1: HTTP 텍스트 파싱 ---
+    lines = http_text.strip().splitlines()
+    first_line = lines[0] if lines else ""
+    parts = first_line.split()
+    
+    # Method와 URL 추출
+    method = parts[0] if parts else "GET"
+    url = parts[1] if len(parts) > 1 else ""
+    
+    # Body 추출 (7주차 로직과 동일하게 'Body:' 접두어 이후 추출)
+    body = ""
+    for ln in lines[1:]:
+        if ln.lower().startswith("body:"):
+            body = ln[5:].strip()
+            break
+            
+    # --- Step 2: 디코딩 및 텍스트 결합 (Step 1 참고) ---
+    url_decoded = unquote(url, encoding="latin-1")
+    body_decoded = unquote(body, encoding="latin-1")
+    full_text = url_decoded + " " + body_decoded
+    
+    # --- Step 3: 특성 계산 (Step 3~6 참고) ---
+    feats = {}
+    
+    # 길이 관련 (Step 3)
+    feats["url_length"] = len(url_decoded)
+    feats["body_length"] = len(body_decoded)
+    feats["total_length"] = feats["url_length"] + feats["body_length"]
+    
+    # URL 구조 관련 (Step 4)
+    parsed = urlparse(url_decoded)
+    params = parse_qs(parsed.query)
+    feats["num_params"] = len(params)
+    feats["path_depth"] = parsed.path.count("/")
+    feats["has_query"] = 1 if parsed.query else 0
+    feats["query_length"] = len(parsed.query)
+    feats["body_num_params"] = len(body_decoded.split("&")) if body_decoded and "=" in body_decoded else 0
+    
+    # 공격 키워드 및 특수문자 (Step 5)
+    text_lower = full_text.lower()
+    sql_keywords = ["select", "union", "drop", "insert", "delete", "update", "' or", "1=1", "1'='1", "--", "/*"]
+    feats["has_sql"] = int(any(kw in text_lower for kw in sql_keywords))
+    feats["sql_keyword_count"] = sum(1 for kw in sql_keywords if kw in text_lower)
+    
+    xss_keywords = ["<script", "alert(", "onerror", "<iframe", "<img", "javascript:", "onfocus", "onload"]
+    feats["has_xss"] = int(any(kw in text_lower for kw in xss_keywords))
+    
+    feats["has_traversal"] = int("../" in full_text or "..\\" in full_text)
+    feats["traversal_count"] = full_text.count("../") + full_text.count("..\\")
+    
+    cmd_patterns = ["; ", "| ", "&&", "/bin/", "/etc/", "exec"]
+    feats["has_cmd_injection"] = int(any(p in text_lower for p in cmd_patterns))
+    feats["has_crlf"] = int("%0d" in text_lower or "%0a" in text_lower)
+    
+    feats["num_special_chars"] = len(re.findall(r"['\";|<>&`\\]", full_text))
+    feats["special_char_ratio"] = feats["num_special_chars"] / max(len(full_text), 1)
+    feats["num_dots"] = full_text.count(".")
+    feats["num_slashes"] = full_text.count("/")
+    feats["num_spaces"] = full_text.count(" ") + full_text.count("%20") + full_text.count("+")
+    
+    # 통계적 특성 (Step 6)
+    feats["url_entropy"] = calculate_entropy(url_decoded) # calculate_entropy 함수는 별도 정의 필요
+    feats["digit_ratio"] = sum(c.isdigit() for c in full_text) / max(len(full_text), 1)
+    feats["upper_ratio"] = sum(c.isupper() for c in full_text) / max(len(full_text), 1)
+    
+    # --- Step 4: feature_cols 순서에 맞춰 리스트 생성 (Step 3-E) ---
+    row = [feats.get(c, 0) for c in feature_cols]
+    return np.array(row, dtype=float).reshape(1, -1)
 
-    7주차 preprocessing.py와 동일한 순서/계산 방식이어야
-    1교시에서 학습한 모델이 올바른 결과를 줍니다.
-
-    Args:
-        http_text: 'GET /path?q=1 HTTP/1.1\\nHost: ...\\nBody: ...' 형태
-        feature_cols: 7주차에서 추출한 특성명 리스트 (23개)
-
-    Returns:
-        shape (1, 23)의 numpy 배열
-    """
-    # TODO 3-A: HTTP 첫 줄에서 method와 url 분리
-    #   lines = http_text.strip().splitlines()
-    #   first = lines[0] if lines else ""
-    #   parts = first.split()
-    #   method = parts[0] if parts else "GET"
-    #   url    = parts[1] if len(parts) > 1 else ""
-
-    # TODO 3-B: body 부분 추출 (빈 줄 또는 'Body:' 접두어 다음)
-    #   body = ""
-    #   for ln in lines[1:]:
-    #       if ln.lower().startswith("body:"):
-    #           body = ln[5:].strip()
-    #           break
-
-    # TODO 3-C: URL 디코딩 + 결합
-    #   url_decoded  = unquote(url, encoding="latin-1")
-    #   body_decoded = unquote(body, encoding="latin-1")
-    #   full_text    = url_decoded + " " + body_decoded
-
-    # TODO 3-D: 특성 dict 구성 (7주차 preprocessing.py 참고)
-    #   feats = {}
-    #   feats["url_length"]  = len(url_decoded)
-    #   feats["body_length"] = len(body_decoded)
-    #   feats["total_length"] = feats["url_length"] + feats["body_length"]
-    #   feats["has_sql_keyword"]  = int(any(k in full_text.lower() for k in SQL_KEYWORDS))
-    #   feats["has_xss_keyword"]  = int(any(k in full_text.lower() for k in XSS_KEYWORDS))
-    #   feats["has_path_traversal"] = int(any(p in full_text for p in PATH_PATTERNS))
-    #   feats["num_special_chars"] = sum(1 for c in full_text if not c.isalnum() and not c.isspace())
-    #   feats["special_char_ratio"] = feats["num_special_chars"] / max(len(full_text), 1)
-    #   feats["num_quotes"]       = full_text.count("'") + full_text.count('"')
-    #   feats["num_url_encoded"]  = len(re.findall(r"%[0-9a-fA-F]{2}", url))
-    #   feats["num_params"]       = len(re.findall(r"[?&][^=]+=", url))
-    #   feats["path_depth"]       = url.split("?")[0].count("/")
-    #   ... (7주차에서 만든 모든 23개 특성)
-
-    # TODO 3-E: feature_cols 순서대로 numpy 배열 만들기
-    #   row = [feats.get(c, 0) for c in feature_cols]
-    #   return np.array(row, dtype=float).reshape(1, -1)
-
-    # 안전 fallback (TODO 채우기 전 동작 확인용)
-    return np.zeros((1, len(feature_cols)))
+# Helper 함수: 엔트로피 계산 (Step 6 코드에서 가져옴)
+def calculate_entropy(text):
+    if not text: return 0.0
+    freq = {}
+    for char in text: freq[char] = freq.get(char, 0) + 1
+    length = len(text)
+    return -sum((c / length) * math.log2(c / length) for c in freq.values())
 
 
 # ============================================================
@@ -146,21 +172,27 @@ def classify_iqr(features: np.ndarray, iqr_bounds: list, threshold: int = 2) -> 
     """IQR 이상치 점수 기반 분류."""
     start = time.perf_counter()
 
-    # TODO 4-A: 23개 특성 중 경계 밖 개수 카운트
-    #   score = 0
-    #   for i, (lower, upper) in enumerate(iqr_bounds):
-    #       if lower is None:
-    #           continue
-    #       if features[0, i] < lower or features[0, i] > upper:
-    #           score += 1
+    # --- TODO 4-A 구현 부분 ---
+    score = 0
+    # iqr_bounds 리스트(특성별 하한, 상한)를 돌면서 체크
+    for i, (lower, upper) in enumerate(iqr_bounds):
+        if lower is None:  # IQR 계산이 불가능한 특성은 건너뜀
+            continue
+        
+        # 현재 입력된 특성값이 정상 범위를 벗어났는지 확인
+        if features[0, i] < lower or features[0, i] > upper:
+            score += 1
+    # --------------------------
 
-    # TODO 4-B: 점수가 임계값 이상이면 공격
-    #   label = "Anomalous" if score >= threshold else "Normal"
+    # --- TODO 4-B 구현 부분 ---
+    # 이상치 개수가 설정한 임계값(기본 2) 이상이면 공격(Anomalous)으로 판정
+    label = "Anomalous" if score >= threshold else "Normal"
+    # --------------------------
 
     elapsed = (time.perf_counter() - start) * 1000
     return {
-        "label": "Normal",       # TODO: 위에서 계산한 label
-        "score": 0,              # TODO: 위에서 계산한 score
+        "label": label,        # 계산된 라벨
+        "score": score,        # 발견된 이상치 개수
         "max_score": len(iqr_bounds),
         "elapsed_ms": elapsed,
     }
@@ -170,16 +202,24 @@ def classify_ml(model, features: np.ndarray, name: str = "RF") -> dict:
     """RandomForest 또는 XGBoost로 분류 + 신뢰도."""
     start = time.perf_counter()
 
-    # TODO 4-C: 예측 + 신뢰도 (확률)
-    #   pred = model.predict(features)[0]
-    #   proba = model.predict_proba(features)[0]
-    #   confidence = float(proba[int(pred)])
-    #   label = "Anomalous" if pred == 1 else "Normal"
+    # --- TODO 4-C 구현 ---
+    # 1. 예측 수행 (0: 정상, 1: 공격)
+    pred = model.predict(features)[0]
+    
+    # 2. 클래스별 확률 추출 (예: [0.1, 0.9] -> 정상 10%, 공격 90%)
+    proba = model.predict_proba(features)[0]
+    
+    # 3. 예측한 결과에 대한 신뢰도 값 추출
+    confidence = float(proba[int(pred)])
+    
+    # 4. 라벨 결정
+    label = "Anomalous" if pred == 1 else "Normal"
+    # ----------------------
 
     elapsed = (time.perf_counter() - start) * 1000
     return {
-        "label": "Normal",       # TODO
-        "confidence": 0.5,       # TODO
+        "label": label,
+        "confidence": confidence,
         "elapsed_ms": elapsed,
         "model_name": name,
     }
@@ -206,38 +246,40 @@ def classify_llm(http_text: str, model_name: str = "gemma3:4b") -> dict:
     try:
         import ollama
     except ImportError:
-        return {"label": "Unknown", "reason": "ollama 패키지 미설치",
-                "elapsed_ms": 0}
+        return {"label": "Unknown", "reason": "ollama 패키지 미설치", "elapsed_ms": 0}
 
-    # TODO 4-D: 프롬프트 생성 + ollama.chat 호출
-    #   prompt = PROMPT_TEMPLATE.format(http_text=http_text)
-    #   try:
-    #       response = ollama.chat(
-    #           model=model_name,
-    #           messages=[{"role": "user", "content": prompt}],
-    #           options={"temperature": 0},
-    #       )
-    #       text = response["message"]["content"]
-    #   except Exception as e:
-    #       return {"label": "Unknown", "reason": f"Ollama 오류: {e}",
-    #               "elapsed_ms": (time.perf_counter()-start)*1000}
+    # --- TODO 4-D: 프롬프트 생성 + ollama.chat 호출 ---
+    prompt = PROMPT_TEMPLATE.format(http_text=http_text)
+    try:
+        response = ollama.chat(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0}, # 결과의 일관성을 위해 0으로 설정
+        )
+        text = response["message"]["content"]
+    except Exception as e:
+        return {"label": "Error", "reason": f"Ollama 오류: {e}", 
+                "elapsed_ms": (time.perf_counter() - start) * 1000}
 
-    # TODO 4-E: JSON 응답 파싱
-    #   match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-    #   if not match:
-    #       return {"label": "Unknown", "reason": text[:80],
-    #               "elapsed_ms": (time.perf_counter()-start)*1000}
-    #   try:
-    #       parsed = json.loads(match.group())
-    #       label = parsed.get("label", "Unknown")
-    #       reason = parsed.get("reason", "")
-    #   except json.JSONDecodeError:
-    #       label, reason = "Unknown", text[:80]
+    # --- TODO 4-E: JSON 응답 파싱 ---
+    # 응답 텍스트 내에서 { ... } 형태의 JSON만 찾아냄
+    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    
+    if not match:
+        return {"label": "Unknown", "reason": f"응답 파싱 실패: {text[:50]}...", 
+                "elapsed_ms": (time.perf_counter() - start) * 1000}
+    
+    try:
+        parsed = json.loads(match.group())
+        label = parsed.get("label", "Unknown")
+        reason = parsed.get("reason", "근거 없음")
+    except json.JSONDecodeError:
+        label, reason = "Unknown", "JSON 형식이 올바르지 않음"
 
     elapsed = (time.perf_counter() - start) * 1000
     return {
-        "label": "Unknown",      # TODO
-        "reason": "TODO: Ollama 호출 미구현",
+        "label": label,
+        "reason": reason,
         "elapsed_ms": elapsed,
     }
 
@@ -254,7 +296,7 @@ with st.sidebar:
     st.markdown("- **LLM**: Ollama gemma3:4b")
     st.markdown("---")
     # TODO 7-B: 학번/이름 표시
-    student_name = st.text_input("학번/이름", value="20XX-XXXXX 홍길동")
+    student_name = st.text_input("학번/이름", value="20232346 유소희")
 
 
 # ============================================================
