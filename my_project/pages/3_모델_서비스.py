@@ -1,116 +1,105 @@
-# pages/3_모델_서비스.py
-import streamlit as st
-import pandas as pd
+# pages/3_모델_서비스.py — 3차 작업: 입력 → 예측 → 결과 (이 프로젝트의 핵심)
+# 아래 4가지 경로(A~D) 중 "내 데이터에 맞는 것 하나만" 골라 쓰세요. 나머지는 지우거나 주석.
+# 목표(MVP): 사용자가 입력 → 모델/LLM이 결과 반환 → 화면에 표시. 동작부터 시킨 뒤 꾸미기.
 import sys
 import os
-import ollama
-
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from src.data_loader import load_steam_data
-from src.features import preprocess_steam_data
 
-st.title('⚖️ AI 취향 매칭 추천')
-st.subheader('당신의 성향을 분석해 숨겨진 명작 인디게임을 추천합니다.')
+import streamlit as st
+from src.data_loader import load_data
+# from src.features import clean, add_features
 
-raw_df = load_steam_data(nrows=50000)
-df = preprocess_steam_data(raw_df)
+st.title("🤖 모델 · 서비스")
 
-st.markdown("### 🎮 밸런스 게임: 당신의 게임 취향은?")
+# =====================================================================
+# 경로 A) 표 데이터 분류/회귀 — scikit-learn  (배운 곳: 10주)
+# =====================================================================
+st.header("경로 A · 머신러닝 (표 데이터)")
 
-q1 = st.radio(
-    "1. 게임할 때 가장 눈과 마음이 즐거운 요소는?",
-    [
-        "📖 깊이 있는 서사와 감동 (Story Rich / Narrative)",
-        "🎨 아기자기하고 정교한 2D 픽셀 도트 그래픽 (Pixel Art)",
-        "🎵 영화 같은 몰입감을 주는 환상적인 배경과 사운드 (Atmospheric / Soundtrack)",
-        "⚔️ 화끈하고 빠른 액션과 타격감 (Action / Hack and Slash)",
-        "🧩 차근차근 풀어나가는 전략과 퍼즐 (Strategy / Puzzle)"
-    ]
-)
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, classification_report
 
-q2 = st.radio(
-    "2. 오늘 당신의 정신 상태에 맞는 난이도는?",
-    [
-        "☕ 힐링하는 극강의 순한맛 (Cozy / Relaxing / Cute)",
-        "🎲 매판 새로운 맵과 영구 죽음! 스릴 넘치는 로그라이크 (Roguelike / Roguelite)",
-        "🧠 세밀한 컨트롤과 패배의 쓴맛을 즐기는 하드코어 Souls-like (Difficult / Souls-like)",
-        "🤝 전 세계 유저와 함께 즐기는 멀티 플레이 (Multiplayer / Co-op)",
-        "🌍 정답 없는 드넓은 세상을 자유롭게 유랑하는 오픈월드 탐험 (Open World / Exploration)"
-    ]
-)
 
-price_limit = st.slider("💵 최대 허용 가격 (USD)", 0.0, 60.0, 20.0)
+@st.cache_resource  # ★ 모델 학습/로드는 한 번만
+def train_model():
+    df = load_data()
+    # df = add_features(clean(df))            # TODO: 정제·특성 적용
+    target = "target"                          # TODO: 예측할 컬럼 이름
+    X = df.drop(columns=[target]).select_dtypes("number")  # 숫자 특성만 (간단 버전)
+    X = X.fillna(X.median())                   # 결측은 중앙값으로 (RandomForest는 NaN 불가)
+    y = df[target]
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    model.fit(Xtr, ytr)
+    pred = model.predict(Xte)
+    metrics = {
+        "accuracy": accuracy_score(yte, pred),
+        "f1": f1_score(yte, pred, average="weighted"),
+        "report": classification_report(yte, pred),
+    }
+    return model, list(X.columns), metrics
 
-if st.button("✨ 내 취향의 인디게임 찾아보기", use_container_width=True):
-    # 가격 필터링
-    filtered_df = df[df['price'] <= price_limit].copy()
-    
-    if filtered_df.empty:
-        st.warning("설정하신 가격대 조건에 맞는 게임이 없습니다. 슬라이더를 조절해 보세요!")
-    else:
-        filtered_df['match_score'] = 0
-        
-        # Q1 선택지별 태그/장르 기반 매칭 가중치 연산
-        if "소설" in q1:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Story Rich|Visual Novel|Narrative', case=False, na=False).astype(int) * 5
-        elif "픽셀" in q1:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Pixel Art|Retro|2D', case=False, na=False).astype(int) * 5
-        elif "영화" in q1:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Atmospheric|Soundtrack', case=False, na=False).astype(int) * 5
-        elif "액션" in q1:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Action|Hack and Slash|Fast-Paced', case=False, na=False).astype(int) * 5
-        elif "머리" in q1:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Strategy|Puzzle|Tactical', case=False, na=False).astype(int) * 5
-            
-        # Q2 선택지별 태그/장르 기반 매칭 가중치 연산
-        if "힐링" in q2:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Casual|Relaxing|Cozy|Cute|Wholesome', case=False, na=False).astype(int) * 5
-        elif "로그라이크" in q2:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Roguelike|Roguelite|Procedural Generation', case=False, na=False).astype(int) * 5
-        elif "Souls-like" in q2:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Difficult|Souls-like|Hard|Permadeath', case=False, na=False).astype(int) * 5
-        elif "멀티" in q2:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Multiplayer|Co-op', case=False, na=False).astype(int) * 5
-        elif "오픈월드" in q2:
-            filtered_df['match_score'] += filtered_df['tags'].str.contains('Open World|Exploration|Adventure', case=False, na=False).astype(int) * 5
 
-        # 매칭 점수, 평점 기준 정렬 후 상위 3개 추천
-        recommendations = filtered_df.sort_values(by=['match_score', 'score'], ascending=False).head(3)
-        
-        st.divider()
-        st.markdown("### 🃏 소희님이 선택한 취향 저격 인디게임 TOP 3")
-        
-        for idx, row in recommendations.iterrows():
-            with st.container(border=True):
-                st.markdown(f"## 🎯 {row['name']}")
-                
-                # 인디게임 메타데이터 배지 UI 구성
-                p_text = "FREE" if row['price'] == 0 else f"${row['price']:.2f}"
-                st.markdown(f"`💵 가격: {p_text}`  `👍 유저 만족도: {row['score']:.1f}%`  `🎮 장르: {row['genres']}`")
-                
-                st.markdown(f"**📝 게임 소개**\n{row['short_description']}")
-                st.caption(f"**🏷️ 연관 태그:** {row['tags']}")
-                
-                st.markdown("---")
-                st.markdown("🤖 **AI 도슨트의 취향 저격 서평**")
-                
-                llm_prompt = f"""
-                너는 친절하고 위트 있는 게임 전문 도슨트야.
-                유저가 선택한 취향 필터({q1}, {q2})와 매칭된 게임 정보들을 바탕으로, 
-                왜 이 게임이 이 유저에게 완벽히 어울리는지 친근한 어조로 딱 2줄 요약해서 한줄평을 써줘.
-                
-                [게임 정보]
-                - 게임 이름: {row['name']}
-                - 설명: {row['short_description']}
-                - 장르: {row['genres']}
-                """
-                
-                try:
-                    with st.spinner("AI 도슨트가 한줄평을 작성하는 중..."):
-                        res = ollama.chat(
-                            model="gemma3:4b",
-                            messages=[{"role": "user", "content": llm_prompt}]
-                        )
-                        st.info(res["message"]["content"])
-                except Exception as e:
-                    st.caption("⚠️ 로컬 Ollama 모델을 불러올 수 없어 기본 매칭 알고리즘 결과만 표시합니다.")
+model, feat_cols, metrics = train_model()
+
+c1, c2 = st.columns(2)
+c1.metric("정확도", f"{metrics['accuracy']*100:.1f}%")
+c2.metric("F1 (weighted)", f"{metrics['f1']*100:.1f}%")
+with st.expander("상세 리포트"):
+    st.text(metrics["report"])
+
+st.subheader("예측해 보기")
+inputs = {}
+for col in feat_cols:
+    inputs[col] = st.number_input(col, value=0.0)
+if st.button("예측"):
+    x = pd.DataFrame([inputs])[feat_cols]
+    st.success(f"예측 결과: **{model.predict(x)[0]}**")
+
+
+# =====================================================================
+# 경로 B) 이미지 분류 — 사전학습 ViT pipeline  (배운 곳: 11·12주)
+# =====================================================================
+# from transformers import pipeline
+# import torch
+# from PIL import Image
+#
+# @st.cache_resource
+# def load_img_model():
+#     device = 0 if torch.cuda.is_available() else -1   # GPU(8GB)면 0, 없으면 CPU
+#     return pipeline("image-classification",
+#                     model="google/vit-base-patch16-224", device=device)
+#
+# clf = load_img_model()
+# up = st.file_uploader("이미지 업로드", type=["jpg", "jpeg", "png"])
+# if up:
+#     img = Image.open(up).convert("RGB")
+#     st.image(img, use_container_width=True)
+#     for r in clf(img, top_k=5):
+#         st.write(f"- {r['label']}: {r['score']*100:.1f}%")
+
+
+# =====================================================================
+# 경로 C) 텍스트 분석 — HuggingFace pipeline  (배운 곳: 5주)
+# =====================================================================
+# from transformers import pipeline
+# @st.cache_resource
+# def load_text_model():
+#     return pipeline("sentiment-analysis")   # 또는 summarization, text-classification
+# nlp = load_text_model()
+# txt = st.text_area("문장 입력")
+# if st.button("분석") and txt:
+#     st.write(nlp(txt))
+
+
+# =====================================================================
+# 경로 D) LLM 서비스 — Ollama 로컬 LLM  (배운 곳: 6주)
+# =====================================================================
+# import ollama
+# prompt = st.text_area("LLM에게 물어보기")
+# if st.button("생성") and prompt:
+#     res = ollama.chat(model="gemma3:4b",
+#                       messages=[{"role": "user", "content": prompt}])
+#     st.write(res["message"]["content"])
